@@ -97,7 +97,7 @@ def _extract_data_prewhiting(src_img, res_img, mask_img, roi_id,shrinkage,shrink
         res_dat=nlm.apply_mask(res_img, roi_img) # T2*P
         res_dat=np.array(res_dat)
         if shrinkage is True: ## (refer to the code of paper "The unreliable influence of multivariate noise normalization on the reliability of neural dissimilarity")
-            res_dat -= np.nanmean(res_dat, axis=0, keepdims=True) # demean raw residual data
+            res_dat -= np.nanmean(res_dat, axis=0, keepdims=True) 
             res_cov_matrix=np.dot(np.transpose(res_dat),res_dat)/res_dat.shape[0] # P*P (voxel covariance matrix)
             F=(np.trace(res_cov_matrix)/res_dat.shape[1])*np.eye(res_dat.shape[1]) 
             if shrink_est is True: # using the OAS method to estimate the shrinkage rate
