@@ -1,0 +1,809 @@
+---
+title: "Statistical_analysis"
+output: html_document
+date: '2022-07-15'
+---
+
+```{r setup, include=FALSE}
+pacman::p_load(tidyverse, lmerTest,vroom, ggpubr,fs, glue, emmeans, ggsci, ggthemes, grid, afex, extrafont)
+knitr::opts_chunk$set(echo = TRUE,dpi = 300, message = FALSE)
+```
+
+```{r}
+emm_options(lmerTest.limit =1000000)
+```
+
+
+---------------------Behavioral Performance----------------------
+```{r}
+## load data
+results_behav_fMRI <- fs::dir_info(".", glob = "*sv", recurse = TRUE) %>% 
+  select(path) %>% 
+  filter(!str_detect(path, "prac|MEG|tmp"), str_detect(path, "ing")) %>%
+  mutate(
+    session = str_extract(path, r"([a-z]+ing)"),
+    task = str_extract(path, r"([a-z](?=_\d+-))"),
+    method = if_else(str_detect(path, "fMRI"), "fMRI", "behav")
+  ) %>%
+  mutate(data = map(path, ~ vroom(.x, na = "n/a") %>% mutate(Response = as.character(Response)))) %>%
+  unnest(data)
+
+tmp <- results_behav_fMRI %>% filter(ConNum==0)
+tmp2 <- results_behav_fMRI %>% filter(ConNum!=0)
+tmp$Condition=case_when(
+  (tmp$SeqNum %in% c(1,2,3,4)) ~ "AYF",
+  (tmp$SeqNum %in% c(5,6,7,8)) ~"VYF",
+  (tmp$SeqNum %in% c(9,10,11,12)) ~"ANF",
+  (tmp$SeqNum %in% c(13,14,15,16)) ~"VNF"
+   )
+results_behav_fMRI2 <- merge(tmp,tmp2,all=T)
+rm(tmp,tmp2)
+```
+
+```{r}
+results_sep1 <- results_behav_fMRI2 %>%
+  filter(ItemPos!=1) %>%
+  separate(Condition,c("modality","prediction","shift"),c(1,2))
+desp_sep_rt1 <- results_sep1 %>% 
+  filter(ACC==1) %>% group_by(method,prediction,SubjID,.drop=FALSE) %>% 
+  summarise(RT=mean(RT, na.rm = TRUE))
+
+stats_sep_rt1 <- desp_sep_rt1 %>% aov_ez(data = ., id = "SubjID", dv = "RT", within = c("method","prediction"))
+
+stats_rt <- data %>% 
+  aov_ez(data = ., id = "SubjID", dv = "RT_diff", within = c("modal","shifting"))
+print(stats_rt)
+pairs(emmeans(stats_rt, ~modal:shifting), simple=list("modal","shifting"))
+```
+
+
+---------------------Predictive activation----------------------
+```{r}
+# Directorie
+bids_dir <- path("D:/Share/fMRI")
+deriv_dir <- path(bids_dir, "derivatives")
+data_dir <- path(deriv_dir, "pattern_similarity")
+out_dir <- path(data_dir, "group", "roi_similarity_desc-pearson-pairwise")
+dir_create(out_dir, recurse = TRUE)
+```
+
+# read rds files
+```{r}
+# Read similarity data from rds files
+simi <- 
+  read_rds(
+    path(
+      out_dir,
+      "simi_all.rds"
+    )
+  )
+```
+
+```{r,warning=False}
+simi_predictable <- simi %>%
+  filter(i1_SeqType == i2_SeqType) %>%
+  filter(i1_SeqStruct == i2_SeqStruct) %>%
+  filter(abs(i1_ItemPos - i2_ItemPos)==1) %>%
+  filter(i1_Stimuli != i2_Stimuli) %>%
+  mutate(
+    Runs=case_when(
+      (i1_run_id == i2_run_id) ~ "WR",
+      (i1_run_id != i2_run_id) ~ "CR"
+      ),
+    SeqType=case_when(
+      (i1_SeqType == 'random') ~"Random",
+      (i1_SeqType == 'consistent') ~ 'Fixed'
+      ),
+    modality=case_when(
+      (i1_modality == 'V' & i2_modality == "V") ~'VV',
+         (((i2_ItemPos-i1_ItemPos == 1) & (i1_modality == "V" & i2_modality == "A")) |
+         ((i1_ItemPos-i2_ItemPos == 1) & (i1_modality == "A" & i2_modality == "V"))) ~'VA',
+      (i1_modality == 'A' & i2_modality == "A") ~'AA',
+         (((i1_ItemPos-i2_ItemPos == 1) & (i1_modality == "V" & i2_modality == "A")) |
+         ((i2_ItemPos-i1_ItemPos == 1) & (i1_modality == "A" & i2_modality == "V"))) ~'AV'
+      )
+    ) %>%
+  select(subj_id,roi_id,roi_hemi,similarity,Runs,SeqType,modality,i1_RT,i2_RT,i1_Stimuli,i2_Stimuli) %>%
+  mutate(
+    subj_id = as_factor(subj_id),
+    roi_id = as_factor(roi_id),
+    roi_hemi = as_factor(roi_hemi) %>%
+      fct_relevel("bilateral", "left", "right"),
+    Runs=as_factor(Runs) %>%
+      fct_relevel("WR","CR"),
+    modality = as_factor(modality),
+    SeqType = as_factor(SeqType) %>%
+      fct_relevel("Random","Fixed"),
+  )
+
+simi_subj_predictable <-
+  simi_predictable %>%
+  group_by(subj_id,roi_id,roi_hemi,Runs,SeqType,modality) %>%
+  summarise(similarity = mean(similarity)) %>%
+  ungroup()
+```
+
+```{r}
+simi_stat_predictable <- simi_subj_predictable %>% 
+  filter(Runs == "CR") %>%
+  group_nest(roi_id,roi_hemi) %>% 
+  mutate(
+    mod = map(
+      data,
+      ~ aov_ez(
+        data = ., id = "subj_id", dv = "similarity", within = c("modality",'SeqType')
+      )
+    )
+  )
+pairs(emmeans(simi_stat_predictable$mdl[[1]],~modality:SeqType),simple=list('modality','SeqType'))
+```
+
+
+---------------------Predictive activation----------------------
+```{r}
+simi_percept <- simi_all %>%
+  filter(i1_SeqType==i2_SeqType) %>%
+  filter(i1_run_id!=i2_run_id) %>%
+  filter(i1_modality==i2_modality) %>%
+  filter(i1_Stimuli!=i2_Stimuli) %>%
+  filter(i1_shift==i2_shift) %>%
+  mutate(
+    SeqType=case_when(
+      (i1_SeqType=="consistent") ~'Fixed',
+      (i1_SeqType=='random') ~'Random'
+    ),
+    modality=case_when(
+      (i1_modality=='V') ~'V',
+      (i1_modality =='A') ~'A',
+      TRUE ~ 'others'
+    ),
+    shift=case_when(
+      (i1_shift =='C')~'C',
+      (i1_shift == 'W') ~'W',
+      TRUE ~'others'
+    )
+  ) %>% filter(shift!='others') %>%
+  select(subj_id,atlas_id,roi_id,roi_hemi,i1_run_id,i2_run_id,i1_Stimuli,i2_Stimuli,similarity,SeqType,modality,shift) %>%
+  mutate(
+    subj_id = as_factor(subj_id),
+    atlas_id=as_factor(atlas_id),
+    roi_id = as_factor(roi_id),
+    roi_hemi = as_factor(roi_hemi) %>%
+      fct_relevel("bilateral", "left", "right"),
+    shift = as_factor(shift) %>%
+      fct_relevel("C","W"),
+    modality = as_factor(modality) %>%
+      fct_relevel("V","A")
+  )
+
+simi_subj_percept <- simi_percept %>% group_by(subj_id,atlas_id,roi_id,roi_hemi,i1_Stimuli,i2_Stimuli,SeqType,modality,shift) %>%
+  summarise(similarity = mean(similarity)) %>%
+  ungroup() %>% unite('index',i1_Stimuli:i2_Stimuli) %>% select(-atlas_id,-roi_hemi)
+rm(simi_percept)
+
+simi_subj_percept_rois <- simi_subj_percept %>%
+  group_by(subj_id, roi_id) %>%
+  pivot_wider(names_from = "roi_id", values_from = "similarity") %>%
+  ungroup()
+
+tmp <- simi_subj_percept %>% group_by(subj_id,roi_id) %>% summarise(similarity=mean(similarity))
+tmp <- left_join(tmp,tmp,by=c('subj_id')) %>% filter(subj_id==1)
+tmp <- tmp[,-3]
+tmp1 <- tmp %>% unite('rois',roi_id.x:roi_id.y)
+all_roi_pairs_label <- tmp1$rois
+tmp2 <- tmp %>% filter(roi_id.x !=roi_id.y) %>% unite('rois',roi_id.x:roi_id.y)
+unique_roi_pair_label <- tmp2$rois
+dim_rois=length(all_roi_pairs_label)
+rm(tmp,tmp2,tmp1,simi_subj_percept)
+
+
+rois_percept <- data.frame()
+id = c(1:21)
+modality=c('V','A')
+shift=c('C','W')
+SeqType=c('Fixed','Random')
+for (s in SeqType){
+  for (m in modality){
+    for (sh in shift){
+      for (i in id){
+        rois_percept_percept_1 <- cor(simi_subj_percept_rois %>% filter(SeqType== s) %>% filter(modality == m) %>% filter(shift==sh)
+                                      %>% filter(subj_id == i) %>% select(-index,-subj_id,-SeqType,-modality,-shift),
+                                      simi_subj_percept_rois %>% filter(SeqType== s) %>% filter(modality == m) %>% filter(shift==sh)
+                                      %>% filter(subj_id == i) %>% select(-index,-subj_id,-SeqType,-modality,-shift))
+        dim(rois_percept_percept_1) <- c(dim_rois*1)
+        rois_percept_percept_1 <- data.frame(subj_id = i,SeqType=s, modality=m, shift=sh,
+                                             roi_id = all_roi_pairs_label, correlation = rois_percept_percept_1)
+        rois_percept <- rbind(rois_percept,rois_percept_percept_1)
+        rm(rois_percept_percept_1)
+      }
+    }
+  }
+}
+
+write.csv(rois_percept, file = path(out_dir,'cross-regions_percept.csv'), quote =FALSE, row.names= FALSE)
+```
+
+```{r}
+# permutation tests
+id = c(1:21)
+modality=c('V','A')
+shift=c('C','W')
+SeqType=c('Fixed','Random')
+for (s in SeqType){
+  for (m in modality){
+    for (sh in shift){
+      #permute
+      NR = 5000
+      PC_percept = matrix(nrow = dim_rois*length(id), ncol = NR) #roi pairs * subj numbers
+      # set.seed(5)
+
+      for(k in 1:NR){
+
+        rois_percept_perm = data.frame()
+        x_percept <- simi_subj_percept_rois %>% sample_frac(., replace = FALSE)
+
+        for (i in id){
+          rois_percept_percept_1 <- cor(simi_subj_percept_rois %>% filter(SeqType== s) %>% filter(modality == m) %>% filter(shift==sh)
+                                        %>% filter(subj_id == i) %>% select(-index,-subj_id,-SeqType,-modality,-shift),
+                                        x_percept %>% filter(SeqType== s) %>% filter(modality == m) %>% filter(shift==sh)
+                                        %>% filter(subj_id == i) %>% select(-index,-subj_id,-SeqType,-modality,-shift))
+          dim(rois_percept_percept_1) <- c(dim_rois*1)
+          rois_percept_percept_1 <- data.frame(subj_id = i,SeqType=s, modality=m, shift=sh,
+                                               roi_id = all_roi_pairs_label, correlation = rois_percept_percept_1)
+          rois_percept_perm <- rbind(rois_percept_perm,rois_percept_percept_1)
+          rm(rois_percept_percept_1)
+        }
+        PC_percept[,k] <- rois_percept_perm$correlation
+      }
+      # output
+      PC_percept <- data.frame(PC_percept) %>%
+        mutate(subj_id = rois_percept_perm$subj_id,roi_id = rois_percept_perm$roi_id) %>%
+        select(subj_id, roi_id, everything())
+      file_name=paste('Cross-regions',s,m,sh,'percept_perm.csv',sep="_")
+      write.csv(PC_percept, file = path(out_dir,file_name), quote =FALSE, row.names= FALSE)
+      rm(PC_percept,rois_percept_perm)
+    }
+  }
+}
+```
+
+```{r}
+modality=c('V','A')
+shift=c('C','W')
+SeqType=c('Fixed','Random')
+Percept_Perm <- data.frame()
+for (s in SeqType){
+  for (m in modality){
+    for (sh in shift){
+      file_name=paste('Cross-regions',s,m,sh,'percept_perm.csv',sep="_")
+      tmp <- read.csv(path(out_dir,file_name))
+      tmp <- tmp %>%
+        rowwise() %>%
+        mutate(correlation = mean(c_across(X1:X1000)), simi_cond = 'baseline',SeqType=s, modality=m, shift=sh) %>%
+        select(subj_id,SeqType,modality,shift,roi_id,correlation,simi_cond)
+      Percept_Perm <- rbind(Percept_Perm,tmp)
+      rm(tmp)
+    }
+  }
+}
+
+rois_percept <- read.csv(path(out_dir,'cross-regions_percept.csv'))
+rois_percept <- rois_percept %>% mutate(simi_cond='original')
+Percept_all <- rbind(rois_percept,Percept_Perm) %>%
+   mutate(
+    subj_id = as_factor(subj_id),
+    roi_id = as_factor(roi_id),
+    SeqType=as_factor(SeqType) %>%
+      fct_relevel('Fixed','Random'),
+    simi_cond=as_factor(simi_cond) %>%
+      fct_relevel("original","baseline")
+  )
+write.csv(Percept_all, file = path(out_dir,'Percept_all.csv'), quote =FALSE, row.names= FALSE)
+rm(rois_percept,Percept_Perm)
+```
+
+```{r}
+simi_predict <- simi_all %>%
+  filter(i1_SeqType==i2_SeqType) %>%
+  filter(i1_run_id!=i2_run_id) %>%
+  filter(i1_modality==i2_modality) %>%
+  filter(i1_Stimuli!=i2_Stimuli) %>%
+  filter(i1_shifting==i2_shifting) %>%
+  mutate(
+    SeqType=case_when(
+      (i1_SeqType=="consistent") ~'Fixed',
+      (i1_SeqType=='random') ~'Random'
+    ),
+    modality=case_when(
+      (i1_modality=='V') ~'V',
+      (i1_modality =='A') ~'A',
+      TRUE ~ 'others'
+    ),
+    shifting=case_when(
+      (i1_shifting =='C')~'C',
+      (i1_shifting == 'W') ~'W',
+      TRUE ~'others'
+    )
+  ) %>% filter(shifting !='others') %>%
+  select(subj_id,atlas_id,roi_id,roi_hemi,i1_run_id,i2_run_id,i1_Stimuli,i2_Stimuli,similarity,SeqType,modality,shifting) %>%
+  mutate(
+    subj_id = as_factor(subj_id),
+    atlas_id=as_factor(atlas_id),
+    roi_id = as_factor(roi_id),
+    roi_hemi = as_factor(roi_hemi) %>%
+      fct_relevel("bilateral", "left", "right"),
+    shifting = as_factor(shifting) %>%
+      fct_relevel("C","W"),
+    modality = as_factor(modality) %>%
+      fct_relevel("V","A")
+  )
+
+simi_subj_predict <- simi_predict %>% group_by(subj_id,atlas_id,roi_id,roi_hemi,i1_Stimuli,i2_Stimuli,SeqType,modality,shifting) %>%
+  summarise(similarity = mean(similarity)) %>%
+  ungroup() %>% unite('index',i1_Stimuli:i2_Stimuli) %>% select(-atlas_id,-roi_hemi)
+rm(simi,simi_predict)
+
+simi_subj_predict_rois <- simi_subj_predict %>%
+  group_by(subj_id, roi_id) %>%
+  pivot_wider(names_from = "roi_id", values_from = "similarity") %>%
+  ungroup()
+
+tmp <- simi_subj_predict %>% group_by(subj_id,roi_id) %>% summarise(similarity=mean(similarity))
+tmp <- left_join(tmp,tmp,by=c('subj_id')) %>% filter(subj_id==1)
+tmp <- tmp[,-3]
+tmp1 <- tmp %>% unite('rois',roi_id.x:roi_id.y)
+all_roi_pairs_label <- tmp1$rois
+dim_rois <- length(all_roi_pairs_label)
+tmp2 <- tmp %>% filter(roi_id.x !=roi_id.y) %>% unite('rois',roi_id.x:roi_id.y)
+unique_roi_pair_label <- tmp2$rois
+rm(tmp,tmp2,tmp1,simi_subj_predict)
+
+rois_predict <- data.frame()
+id = c(1:21)
+modality=c('V','A')
+shifting=c('C','W')
+SeqType=c('Fixed','Random')
+for (s in SeqType){
+  for (m in modality){
+    for (sh in shifting){
+      for (i in id){
+        rois_predict_predict_1 <- cor(simi_subj_predict_rois %>% filter(SeqType== s) %>% filter(modality == m) %>% filter(shifting==sh)
+                                      %>% filter(subj_id == i) %>% select(-index,-subj_id,-SeqType,-modality,-shifting),
+                                      simi_subj_predict_rois %>% filter(SeqType== s) %>% filter(modality == m) %>% filter(shifting==sh)
+                                      %>% filter(subj_id == i) %>% select(-index,-subj_id,-SeqType,-modality,-shifting))
+        dim(rois_predict_predict_1) <- c(dim_rois*1)
+        rois_predict_predict_1 <- data.frame(subj_id = i,SeqType=s, modality=m, shift=sh,
+                                             roi_id = all_roi_pairs_label, correlation = rois_predict_predict_1)
+        rois_predict <- rbind(rois_predict,rois_predict_predict_1)
+        rm(rois_predict_predict_1)
+      }
+    }
+  }
+}
+write.csv(rois_predict, file = path(out_dir,'cross-regions_predict.csv'), quote =FALSE, row.names= FALSE)
+```
+
+```{r}
+# permutation tests
+id = c(1:21)
+modality=c('V','A')
+shifting=c('C','W')
+SeqType=c('Fixed','Random')
+for (s in SeqType){
+  for (m in modality){
+    for (sh in shifting){
+      #permute
+      NR = 5000
+      PC_predict = matrix(nrow = dim_rois*length(id), ncol = NR)
+      # set.seed(5)
+
+      for(k in 1:NR){
+
+        rois_predict_perm = data.frame()
+        x_predict <- simi_subj_predict_rois %>% sample_frac(., replace = FALSE)
+
+        for (i in id){
+          rois_predict_predict_1 <- cor(simi_subj_predict_rois %>% filter(SeqType== s) %>% filter(modality == m) %>% filter(shifting==sh)
+                                        %>% filter(subj_id == i) %>% select(-index,-subj_id,-SeqType,-modality,-shifting),
+                                        x_predict %>% filter(SeqType== s) %>% filter(modality == m) %>% filter(shifting==sh)
+                                        %>% filter(subj_id == i) %>% select(-index,-subj_id,-SeqType,-modality,-shifting))
+          dim(rois_predict_predict_1) <- c(dim_rois*1)
+          rois_predict_predict_1 <- data.frame(subj_id = i,SeqType=s, modality=m, shift=sh,
+                                               roi_id = all_roi_pairs_label, correlation = rois_predict_predict_1)
+          rois_predict_perm <- rbind(rois_predict_perm,rois_predict_predict_1)
+        }
+        rm(rois_predict_predict_1)
+        PC_predict[,k] <- rois_predict_perm$correlation
+      }
+      # output
+      PC_predict <- data.frame(PC_predict) %>%
+        mutate(subj_id = rois_predict_perm$subj_id,roi_id = rois_predict_perm$roi_id) %>%
+        select(subj_id, roi_id, everything())
+      file_name=paste('Cross-regions',s,m,sh,'predict_perm.csv',sep="_")
+      write.csv(PC_predict, file = path(out_dir,file_name), quote =FALSE, row.names= FALSE)
+      rm(PC_predict,rois_predict_perm)
+    }
+  }
+}
+```
+
+```{r}
+modality=c('V','A')
+shift=c('C','W')
+SeqType=c('Fixed','Random')
+Predict_Perm <- data.frame()
+for (s in SeqType){
+  for (m in modality){
+    for (sh in shift){
+      file_name=paste('Cross-regions',s,m,sh,'percept_perm.csv',sep="_")
+      tmp <- read.csv(path(out_dir,file_name))
+      tmp <- tmp %>% rowwise() %>% 
+        mutate(correlation = mean(c_across(X1:X1000)), simi_cond = 'baseline',SeqType=s, modality=m, shift=sh) %>% 
+        select(subj_id,SeqType,modality,shift,roi_id,correlation,simi_cond)
+      Predict_Perm <- rbind(Predict_Perm,tmp)
+      rm(tmp)
+    }
+  }
+}
+
+rois_predict <- read.csv(path(out_dir,'cross-regions_predict.csv'))
+rois_predict <- rois_predict %>% mutate(simi_cond='original')
+Predict_all <- rbind(rois_predict,Predict_Perm) %>% 
+   mutate(
+    subj_id = as_factor(subj_id),
+    roi_id = as_factor(roi_id),
+    SeqType=as_factor(SeqType) %>% 
+      fct_relevel('Fixed','Random'),
+    simi_cond=as_factor(simi_cond) %>% 
+      fct_relevel("original","baseline")
+  )
+write.csv(Predict_all, file = path(out_dir,'Predict_all.csv'), quote =FALSE, row.names= FALSE)
+rm(rois_predict,Predict_Perm)
+```
+
+
+
+```{r}
+# V-V & A-A
+rois_percept_predict1 <- data.frame()
+id = c(1:21) #
+modal=c('V','A')
+Seq=c('Fixed','Random')
+for (s in Seq){
+  for (m in modal){
+    for (i in id){
+      x1 <- simi_subj_percept_rois %>%
+          filter(SeqType== s) %>%
+          filter(modality == m) %>%
+          filter(shift=='W') %>%
+          filter(subj_id == i) %>%
+          select(-index,-subj_id,-SeqType,-modality,-shift)
+      x2 <- simi_subj_predict_rois %>%
+          filter(SeqType== s) %>%
+          filter(modality == m) %>%
+          filter(shifting=="W") %>%
+          filter(subj_id == i) %>%
+          select(-index,-subj_id,-SeqType,-modality,-shifting)
+      if (dim(x1)[1] != dim(x2)[1]){
+        if (dim(x1)[1]>dim(x2)[1]){
+          x1_new=x1[1:dim(x2)[1],]
+          rois_percept_predict_1 <- cor(x1_new,x2)
+          rm(x1_new,x1,x2)
+          }
+        else{
+          x2_new=x2[1:dim(x1)[1],]
+          rois_percept_predict_1 <- cor(x1,x2_new)
+          rm(x1,x2,x2_new)
+        }
+      }
+      else{
+        rois_percept_predict_1 <- cor(x1,x2)
+        rm(x1,x2)
+      }
+
+      dim(rois_percept_predict_1) <- c(dim_rois*1)
+      rois_percept_predict_1 <- data.frame(subj_id = i,SeqType=s, modality=m, shift="W",
+                                           roi_id = all_roi_pairs_label, correlation = rois_percept_predict_1)
+      rois_percept_predict1 <- rbind(rois_percept_predict1,rois_percept_predict_1)
+      rm(rois_percept_predict_1)
+    }
+  }
+}
+write.csv(rois_percept_predict1, file = path(out_dir,'cross-regions_percept_predict_within.csv'), quote =FALSE, row.names= FALSE)
+
+#A-V
+rois_percept_predict2 <- data.frame()
+id = c(1:21)
+Seq=c('Fixed','Random')
+for (s in Seq){
+    for (i in id){
+      x1 <- simi_subj_percept_rois %>%
+        filter(SeqType== s) %>%
+        filter(modality == 'V') %>%
+        filter(shift=='C') %>%
+        filter(subj_id == i) %>%
+        select(-index,-subj_id,-SeqType,-modality,-shift)
+      x2 <- simi_subj_predict_rois %>%
+        filter(SeqType== s) %>%
+        filter(modality == "A") %>%
+        filter(shifting=="C") %>%
+        filter(subj_id == i) %>%
+        select(-index,-subj_id,-SeqType,-modality,-shifting)
+    if (dim(x1)[1] != dim(x2)[1]){
+      if (dim(x1)[1]>dim(x2)[1]){
+        x1_new=x1[1:dim(x2)[1],]
+        rois_percept_predict_1 <- cor(x1_new,x2)
+        rm(x1_new,x1,x2)
+        }
+      else{
+        x2_new=x2[1:dim(x1)[1],]
+        rois_percept_predict_1 <- cor(x1,x2_new)
+        rm(x1,x2,x2_new)
+      }
+    }
+    else{
+      rois_percept_predict_1 <- cor(x1,x2)
+      rm(x1,x2)
+    }
+
+    dim(rois_percept_predict_1) <- c(dim_rois*1)
+    rois_percept_predict_1 <- data.frame(subj_id = i,SeqType=s, modality="A_V", shift="C",
+                                         roi_id = all_roi_pairs_label, correlation = rois_percept_predict_1)
+    rois_percept_predict2 <- rbind(rois_percept_predict2,rois_percept_predict_1)
+    rm(rois_percept_predict_1)
+    }
+}
+file_name=paste('cross-regions_percept_predict_A_V.csv',sep="_")
+write.csv(rois_percept_predict2, file = path(out_dir,file_name), quote =FALSE, row.names= FALSE)
+
+# V-A
+rois_percept_predict3 <- data.frame()
+id = c(1:21)
+Seq=c('Fixed','Random')
+for (s in Seq){
+    for (i in id){
+      x1 <- simi_subj_percept_rois %>%
+        filter(SeqType== s) %>%
+        filter(modality == 'A') %>%
+        filter(shift=='C') %>%
+        filter(subj_id == i) %>%
+        select(-index,-subj_id,-SeqType,-modality,-shift)
+      x2 <- simi_subj_predict_rois %>%
+        filter(SeqType== s) %>%
+        filter(modality == "V") %>%
+        filter(shifting=="C") %>%
+        filter(subj_id == i) %>%
+        select(-index,-subj_id,-SeqType,-modality,-shifting)
+    if (dim(x1)[1] != dim(x2)[1]){
+      if (dim(x1)[1]>dim(x2)[1]){
+        x1_new=x1[1:dim(x2)[1],]
+        rois_percept_predict_1 <- cor(x1_new,x2)
+        rm(x1_new,x1,x2)
+        }
+      else{
+        x2_new=x2[1:dim(x1)[1],]
+        rois_percept_predict_1 <- cor(x1,x2_new)
+        rm(x1,x2,x2_new)
+      }
+    }
+    else{
+      rois_percept_predict_1 <- cor(x1,x2)
+      rm(x1,x2)
+    }
+
+    dim(rois_percept_predict_1) <- c(dim_rois*1)
+    rois_percept_predict_1 <- data.frame(subj_id = i,SeqType=s, modality="V_A", shift="C",
+                                         roi_id = all_roi_pairs_label, correlation = rois_percept_predict_1)
+    rois_percept_predict3 <- rbind(rois_percept_predict3,rois_percept_predict_1)
+    rm(rois_percept_predict_1)
+    }
+}
+file_name=paste('cross-regions_percept_predict_V_A.csv',sep="_")
+write.csv(rois_percept_predict3, file = path(out_dir,file_name), quote =FALSE, row.names= FALSE)
+```
+
+
+```{r}
+# permutation tests
+# V-V & A-A
+id = c(1:21)
+modal=c('V','A')
+Seq=c('Fixed','Random')
+for (s in SeqType){
+  for (m in modality){
+      #permute
+      NR = 5000
+      PC_percept_predict1 = matrix(nrow = dim_rois*length(id), ncol = NR)
+      # set.seed(5)
+      
+      for(k in 1:NR){
+        
+        rois_percept_predict_perm1 = data.frame()
+        x_percept_predict1 <- simi_subj_predict_rois %>% sample_frac(., replace = FALSE) #permuet predict
+        
+        for (i in id){
+          x1 <- simi_subj_percept_rois %>% 
+            filter(SeqType== s) %>% 
+            filter(modality == m) %>% 
+            filter(shift=='W') %>% 
+            filter(subj_id == i) %>% 
+            select(-index,-subj_id,-SeqType,-modality,-shift)
+          x2 <- x_percept_predict1 %>% 
+            filter(SeqType== s) %>% 
+            filter(modality == m) %>% 
+            filter(shifting=="W") %>% 
+            filter(subj_id == i) %>% 
+            select(-index,-subj_id,-SeqType,-modality,-shifting)
+          if (dim(x1)[1] != dim(x2)[1]){
+            if (dim(x1)[1]>dim(x2)[1]){
+              x1_new=x1[1:dim(x2)[1],]
+              rois_percept_predict_1 <- cor(x1_new,x2)
+              rm(x1_new,x1,x2)
+              }
+            else{
+              x2_new=x2[1:dim(x1)[1],]
+              rois_percept_predict_1 <- cor(x1,x2_new)
+              rm(x1,x2,x2_new)
+            }
+          }
+          else{
+            rois_percept_predict_1 <- cor(x1,x2)
+            rm(x1,x2)
+          }
+
+          dim(rois_percept_predict_1) <- c(dim_rois*1)
+          rois_percept_predict_1 <- data.frame(subj_id = i,SeqType=s, modality=m, shift='W', 
+                                               roi_id = all_roi_pairs_label, correlation = rois_percept_predict_1)
+          rois_percept_predict_perm1 <- rbind(rois_percept_predict_perm1,rois_percept_predict_1)
+        }
+        rm(rois_percept_predict_1)
+        PC_percept_predict1[,k] <- rois_percept_predict_perm1$correlation
+      }
+      rm(x_percept_predict1)
+      # output
+      PC_percept_predict1 <- data.frame(PC_percept_predict1) %>% 
+        mutate(subj_id = rois_percept_predict_perm1$subj_id,roi_id = rois_percept_predict_perm1$roi_id) %>% select(subj_id, roi_id, everything())
+      file_name=paste('cross-regions',s,m,"W",'percept_predict_perm.csv',sep="_")
+      write.csv(PC_percept_predict1, file = path(out_dir,file_name), quote =FALSE, row.names= FALSE)
+      rm(rois_percept_predict_perm1,PC_percept_predict1)
+  }
+}
+
+#V-A
+id = c(1:21)
+Seq=c('Fixed','Random')
+for (s in SeqType){
+    #permute
+    NR = 5000
+    PC_percept_predict2 = matrix(nrow = dim_rois*length(id), ncol = NR)
+    # set.seed(5)
+    
+    for(k in 1:NR){
+      
+      rois_percept_predict_perm2 = data.frame()
+      x_percept_predict2 <- simi_subj_predict_rois %>% sample_frac(., replace = FALSE) #permuet predict
+      
+      for (i in id){
+        x1 <- simi_subj_percept_rois %>% 
+          filter(SeqType== s) %>% 
+          filter(modality == "A") %>% 
+          filter(shift=='C') %>% 
+          filter(subj_id == i) %>% 
+          select(-index,-subj_id,-SeqType,-modality,-shift)
+        x2 <- x_percept_predict2 %>% 
+          filter(SeqType== s) %>% 
+          filter(modality == "V") %>% 
+          filter(shifting=="C") %>% 
+          filter(subj_id == i) %>% 
+          select(-index,-subj_id,-SeqType,-modality,-shifting)
+        if (dim(x1)[1] != dim(x2)[1]){
+          if (dim(x1)[1]>dim(x2)[1]){
+            x1_new=x1[1:dim(x2)[1],]
+            rois_percept_predict_1 <- cor(x1_new,x2)
+            rm(x1_new,x1,x2)
+            }
+          else{
+            x2_new=x2[1:dim(x1)[1],]
+            rois_percept_predict_1 <- cor(x1,x2_new)
+            rm(x1,x2,x2_new)
+          }
+        }
+        else{
+          rois_percept_predict_1 <- cor(x1,x2)
+          rm(x1,x2)
+        }
+        
+        dim(rois_percept_predict_1) <- c(dim_rois*1)
+        rois_percept_predict_1 <- data.frame(subj_id = i,SeqType=s, modality="V-A", shift='C', 
+                                             roi_id = all_roi_pairs_label, correlation = rois_percept_predict_1)
+        rois_percept_predict_perm2 <- rbind(rois_percept_predict_perm2,rois_percept_predict_1)
+      }
+      rm(rois_percept_predict_1)
+      PC_percept_predict2[,k] <- rois_percept_predict_perm2$correlation
+    }
+    rm(x_percept_predict2)
+    # output
+    PC_percept_predict2 <- data.frame(PC_percept_predict2) %>% 
+      mutate(subj_id = rois_percept_predict_perm2$subj_id,roi_id = rois_percept_predict_perm2$roi_id) %>% select(subj_id, roi_id, everything())
+    file_name=paste('cross-regions',s,"V_A",'percept_predict_perm.csv',sep="_")
+    write.csv(PC_percept_predict2, file = path(out_dir,file_name), quote =FALSE, row.names= FALSE)
+    rm(PC_percept_predict2,rois_percept_predict_perm2)
+}
+
+#A-V
+id = c(1:21)
+SeqType=c('Random')
+for (s in SeqType){
+    #permute
+    NR = 5000
+    PC_percept_predict3 = matrix(nrow = dim_rois*length(id), ncol = NR)
+    # set.seed(5)
+    
+    for(k in 1:NR){
+      
+      rois_percept_predict_perm3 = data.frame()
+      x_percept_predict3 <- simi_subj_predict_rois %>% sample_frac(., replace = FALSE) #permuet predict
+      
+      for (i in id){
+        x1 <- simi_subj_percept_rois %>% 
+          filter(SeqType== s) %>% 
+          filter(modality == "V") %>% 
+          filter(shift=='C') %>% 
+          filter(subj_id == i) %>% 
+          select(-index,-subj_id,-SeqType,-modality,-shift)
+        x2 <- x_percept_predict3 %>% 
+          filter(SeqType== s) %>% 
+          filter(modality == "A") %>% 
+          filter(shifting=="C") %>% 
+          filter(subj_id == i) %>% 
+          select(-index,-subj_id,-SeqType,-modality,-shifting)
+        if (dim(x1)[1] != dim(x2)[1]){
+          if (dim(x1)[1]>dim(x2)[1]){
+            x1_new=x1[1:dim(x2)[1],]
+            rois_percept_predict_1 <- cor(x1_new,x2)
+            rm(x1_new,x1,x2)
+            }
+          else{
+            x2_new=x2[1:dim(x1)[1],]
+            rois_percept_predict_1 <- cor(x1,x2_new)
+            rm(x1,x2,x2_new)
+          }
+        }
+        else{
+          rois_percept_predict_1 <- cor(x1,x2)
+          rm(x1,x2)
+        }
+        
+        dim(rois_percept_predict_1) <- c(dim_rois*1)
+        rois_percept_predict_1 <- data.frame(subj_id = i,SeqType=s, modality="A-V", shift='C', 
+                                             roi_id = all_roi_pairs_label, correlation = rois_percept_predict_1)
+        rois_percept_predict_perm3 <- rbind(rois_percept_predict_perm3,rois_percept_predict_1)
+      }
+      rm(rois_percept_predict_1)
+      PC_percept_predict3[,k] <- rois_percept_predict_perm3$correlation
+    }
+    rm(x_percept_predict3)
+    # output
+    PC_percept_predict3 <- data.frame(PC_percept_predict3) %>% 
+      mutate(subj_id = rois_percept_predict_perm3$subj_id,roi_id = rois_percept_predict_perm3$roi_id) %>% select(subj_id, roi_id, everything())
+    file_name=paste('cross-regions',s,"A_V",'percept_predict_perm.csv',sep="_")
+    write.csv(PC_percept_predict3, file = path(out_dir,file_name), quote =FALSE, row.names= FALSE)
+    rm(PC_percept_predict3,rois_percept_predict_perm3)
+}
+```
+
+```{r}
+mod_Percept_Predict_all <- Percept_Predict_all %>%
+  filter(simi_cond=='original') %>% 
+  group_nest(roi_id) %>%
+  mutate(
+    mod = map(
+      data,
+      ~ aov_ez(
+        data = ., id = "subj_id", dv = "correlation", within = c("modality",'SeqType')
+      )
+    )
+  )
+
+pairs(emmeans(mod_Percept_Predict_all$mod[[1]],~modality:SeqType),simple=list('SeqType','modality')) 
+···
